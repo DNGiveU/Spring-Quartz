@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<beans xmlns="http://www.springframework.org/schema/beans"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xmlns:task="http://www.springframework.org/schema/task"
+	xmlns:context="http://www.springframework.org/schema/context"
+	xsi:schemaLocation="http://www.springframework.org/schema/task http://www.springframework.org/schema/task/spring-task-3.2.xsd
+		http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans.xsd
+		http://www.springframework.org/schema/context http://www.springframework.org/schema/context/spring-context-3.2.xsd">
+	
+	<!-- // ###################################################### -->
+	<!--
+		Job [定义了任务的要素|规范|条件]
+			|- QuartzJobBean [使用继承方式]
+			
+		JobDetail [任务的描述]
+			|- JobDetailBean 
+			|- JobDetailImpl [承载自定义方式任务类的描述]
+			
+		QuartzJobBean#executeInternal(..)
+		JobDetailImpl#Class<? extends Job>
+		
+		IOC注入路线
+		CustomObject
+		 |
+		JobDetail[JobDetailImpl]
+		 |
+		CronTrigger(JobDetail + CronExpression)[具体使用-CronTriggerImpl]
+		 |
+		SchedulerFactory[StdSchedulerFactory] SchedulerFactoryBean#startScheduler(..)
+	-->
+	<!-- // ###################################################### -->
+	
+	<!-- // ###################################################### -->
+	<!-- 自定义任务类 -->
+	<bean id="jobTask" class="com.task.JobTask"/>
+
+	<!-- 
+		获取JobDetail[JobDetailImpl]
+		使用MethodInvokingJobDetailFactoryBean,任务类可以不实现Job接口[QuartzJobBean],通过targetMethod指定调度方法
+		MethodInvokingJobDetailFactoryBean使用MethodInvoker来代理自定义任务类(jobTask) 
+		在内部定义了一个MethodInvokingJob(extends QuartzJobBean)类来执行任务
+		MethodInvokingJobDetailFactoryBean#afterPropertiesSet()中
+			prepare(); // 将targetMethod指定的方法具体化为methodObject(其在invoke()中实际调用),即为方法的具体类
+			Class<?> jobClass = (this.concurrent ? MethodInvokingJob.class : StatefulMethodInvokingJob.class);
+				// 通过StatefulMethodInvokingJob来限制任务不能并发执行，因为StatefulMethodInvokingJob实现了StatefulJob(@DisallowConcurrentExecution)
+			bw.setPropertyValue("jobClass", jobClass); // 将jobClass(extends JobDetailBean)赋值给jobDetailImplClass(class:org.quartz.impl.JobDetailImpl)#jobClass
+	
+		CustomClass
+			|
+		MethodInvokingJob(extends QuartzJobBean)#MethodInvoke
+			|
+		JobDetailImpl#Class<? extends Job>
+	-->
+	<bean id="jobDetail" class="org.springframework.scheduling.quartz.MethodInvokingJobDetailFactoryBean">
+		<property name="group" value="job_work"/>
+		<property name="name"><value>job_work_name</value> </property>
+		<property name="concurrent"><value>true</value> </property>
+		<property name="targetObject"><ref bean="jobTask"/> </property>
+		<property name="targetMethod"><value>run</value> </property>
+	</bean>
+	
+	<!-- // ###################################################### -->
+	
+	<!-- // ###################################################### -->
+	<!-- 使用集成QuartzJobBean的方式 -->
+	<!-- <bean id="jobDetail" class="org.springframework.scheduling.quartz.JobDetailBean">
+		<property name="beanName"><value>task_bean</value></property>
+		<property name="jobClass"><value>com.task.SimpleTask</value></property>
+		<property name="jobDataAsMap">
+			<map>
+				<entry key="key"><value>value</value> </entry>
+			</map>
+		</property>
+	</bean> -->
+	<!-- // ###################################################### -->
+	
+	<!-- 调度触发器#getObject() CronTriggerImpl -->
+	<bean id="trigger" class="org.springframework.scheduling.quartz.CronTriggerFactoryBean">
+		<property name="group"><value>work_default</value></property>
+		<property name="name"><value>work_default_name</value></property>
+		<property name="jobDetail"><ref bean="jobDetail"/></property>
+		<!-- https://www.dexcoder.com/selfly/article/297 cronExpression介绍 -->
+		<property name="cronExpression"><value>0/2 * * * * ?</value></property>
+	</bean>
+	
+	<!-- 
+		调度工厂#getObject() StdSchedulerFactory
+		startScheduler(..){new Thread() { public void run() { while (true) { // .. }}}}
+	-->
+	<!-- <bean id="scheduler" class="org.springframework.scheduling.quartz.SchedulerFactoryBean">
+		<property name="triggers">
+			<list>
+				<ref bean="trigger"/>
+			</list>
+		</property>
+	</bean> -->
+	
+	<!--  
+		通过注解的方式配置 schuduler,我们在IOC容器中存在的是org.quartz.impl.StdScheduler,而不是org.springframework.scheduling.quartz.SchedulerFactoryBean
+			因为org.springframework.scheduling.quartz.SchedulerFactoryBean实现了BeanFactory<Scheduler>接口
+			在IOC初始化时，会调用实现了BeanFactory<?>的getObject()方法来获取对象。
+			而SchedulerFactoryBean#getObject()方法返回的是this.sheduler
+			而this.sheduler在afterPropertiesSet()方法中初始化
+				this.scheduler = createScheduler(schedulerFactory, this.schedulerName);
+			而schedulerFactory默认是通过反射(schedulerFactoryClass = StdSchedulerFactory.class)获取的
+			在afterPropertiesSet()中
+				// Create SchedulerFactory instance.
+				SchedulerFactory schedulerFactory = (SchedulerFactory)
+						BeanUtils.instantiateClass(this.schedulerFactoryClass);
+				initSchedulerFactory(schedulerFactory);
+		###
+		而且IOC中的trigger是org.quartz.impl.triggers.CronTriggerImpl类型
+		那么为什么trigger是org.quartz.impl.triggers.CronTriggerImpl呢？
+			因为org.springframework.scheduling.quartz.CronTriggerFactoryBean实现了BeanFactory<CronTrigger>接口，
+			在IOC初始化时，会调用实现了BeanFactory<?>的getObject()方法来获取对象。
+			而CronTriggerFactoryBean#getObject()方法返回的是this.cronTrigger
+			而this.cronTrigger在afterPropertiesSet()方法中初始化
+				Class cronTriggerClass = getClass().getClassLoader().loadClass("org.quartz.impl.triggers.CronTriggerImpl");
+				...
+				BeanWrapper bw = new BeanWrapperImpl(cronTriggerClass);
+				...
+				this.cronTrigger = (CronTrigger) bw.getWrappedInstance();
+	-->
+	<context:component-scan base-package="com.config"></context:component-scan>
+</beans>
